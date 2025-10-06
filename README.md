@@ -16,10 +16,7 @@ Small sample project demonstrating a custodial wallet flow using Tatum's Gas Pum
 - [Prerequisites](#prerequisites)  
 - [Quick start](#quick-start)  
 - [Environment variables](#environment-variables)  
-- [Scripts](#scripts)  
-- [Security & best practices](#security--best-practices)  
-- [Troubleshooting](#troubleshooting)  
-- [License](#license)
+
 
 ---
 
