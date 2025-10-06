@@ -1,0 +1,20 @@
+{
+  "name": "custodial-wallet",
+  "version": "1.0.0",
+  "description": "Custodial wallet using Tatum Gas Pump on Ethereum mainnet",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "create-wallet": "node src/scripts/createCustodial.js",
+    "sweep": "node src/scripts/batchSweep.js",
+    "setup-gasmaster": "node src/scripts/setupGasPumpMaster.js"
+    
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.9.2",
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2"
+  }
+}
