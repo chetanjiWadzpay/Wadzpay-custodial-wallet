@@ -1,66 +1,167 @@
-import express from "express";
-import { ethers } from "ethers";
-import { loadConfig } from "./config.js";
-import { WalletManager } from "./services/walletManager.js";
-import { runBatchSweep } from "./scripts/batchSweep.js";
-import { logger } from "./utils/logger.js";
+// src/index.js
+import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import 'dotenv/config';
+
+import createCustodialWallet from './scripts/createCustodial.js';
+import { runBatchSweep } from './scripts/batchSweep.js';
+import { createGasPumpMaster } from './services/gasPump.js';
+import { loadConfig } from './config.js';
 
 const app = express();
 app.use(express.json());
 
-const config = loadConfig();
+// helpers
+const DB_FILE = path.join(process.cwd(), 'src', 'db.json');
 
-// Setup W Chain provider
-const provider = new ethers.JsonRpcProvider(config.RPC_URL, {
-  chainId: 171717,
-  name: "w_chain",
-});
-
-// Initialize Wallet Manager
-const walletManager = new WalletManager(provider, config);
-
-// -------------------- ROUTES -------------------- //
-
-// Health check
-app.get("/", (req, res) => {
-  res.json({ status: "Custodial Wallet API running on W Chain" });
-});
-
-// Create new custodial wallet
-app.post("/wallets", async (req, res) => {
+function readDb() {
+  if (!fs.existsSync(DB_FILE)) return { wallets: [] };
   try {
-    const wallet = await walletManager.createCustodialWallet();
-    res.json(wallet);
+    const raw = fs.readFileSync(DB_FILE, 'utf8') || '{}';
+    return JSON.parse(raw);
+  } catch (e) {
+    return { wallets: [] };
+  }
+}
+
+function writeDb(obj) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(obj, null, 2));
+}
+
+// Safe responder
+function sendError(res, status = 500, message = 'Internal error') {
+  return res.status(status).json({ ok: false, error: message });
+}
+
+app.get('/', (req, res) => {
+  const cfg = loadConfig();
+  res.json({
+    ok: true,
+    service: 'Wadzpay - Custodial Wallet API',
+    env: process.env.NODE_ENV || 'development',
+    defaultChain: cfg.DEFAULT_CHAIN || process.env.DEFAULT_CHAIN || 'ETH',
+    docs: 'Use /wallets, /wallets/:address, /wallets (POST), /setup-master (POST), /sweep (POST)'
+  });
+});
+
+/**
+ * GET /wallets
+ * Returns array of saved custodial child wallets from src/db.json
+ */
+app.get('/wallets', (req, res) => {
+  try {
+    const db = readDb();
+    return res.json({ ok: true, wallets: db.wallets || [] });
   } catch (err) {
-    logger.error("Error creating wallet:", err);
-    res.status(500).json({ error: "Failed to create wallet" });
+    return sendError(res, 500, err.message);
   }
 });
 
-// List all wallets
-app.get("/wallets", async (req, res) => {
+/**
+ * GET /wallets/:address
+ * Return a single wallet entry
+ */
+app.get('/wallets/:address', (req, res) => {
   try {
-    const wallets = await walletManager.getAllWallets();
-    res.json(wallets);
+    const addr = req.params.address;
+    const db = readDb();
+    const wallets = db.wallets || [];
+    const w = wallets.find(x => String(x.address).toLowerCase() === String(addr).toLowerCase());
+    if (!w) return sendError(res, 404, 'Wallet not found');
+    return res.json({ ok: true, wallet: w });
   } catch (err) {
-    logger.error("Error fetching wallets:", err);
-    res.status(500).json({ error: "Failed to fetch wallets" });
+    return sendError(res, 500, err.message);
   }
 });
 
-// Trigger batch sweep manually
-app.post("/sweep", async (req, res) => {
+/**
+ * POST /wallets
+ * Create a new custodial child address for a given chain.
+ * Body: { chain: 'ETH'|'POLYGON'|'BSC' }  (chain optional, falls back to DEFAULT_CHAIN)
+ *
+ * Note: createCustodialWallet() reads process.env.CHAIN or process.argv[2].
+ * We set process.env.CHAIN temporarily to pass the chain requested.
+ */
+app.post('/wallets', async (req, res) => {
+  const { chain } = req.body || {};
+  const prevChain = process.env.CHAIN;
+  if (chain) process.env.CHAIN = chain;
+
   try {
-    const report = await runBatchSweep();
-    res.json(report);
+    const child = await createCustodialWallet(); // will save to src/db.json on success
+    // restore env
+    if (typeof prevChain === 'undefined') delete process.env.CHAIN;
+    else process.env.CHAIN = prevChain;
+
+    // read DB to return created wallet entry
+    const db = readDb();
+    const saved = db.wallets?.find(w => w.address === child) || null;
+    return res.json({ ok: true, created: child, wallet: saved });
   } catch (err) {
-    logger.error("Error running batch sweep:", err);
-    res.status(500).json({ error: "Sweep failed" });
+    // restore env even on error
+    if (typeof prevChain === 'undefined') delete process.env.CHAIN;
+    else process.env.CHAIN = prevChain;
+    return sendError(res, 500, err.message);
   }
 });
 
-// -------------------- SERVER -------------------- //
-const PORT = config.APP_PORT || 3000;
+/**
+ * POST /setup-master
+ * Precalculate Gas Pump child addresses on Tatum for the master EOA.
+ * Body: { chain?: 'ETH'|'POLYGON'|'BSC', from?: number, to?: number }
+ */
+app.post('/setup-master', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const chain = (body.chain || process.env.DEFAULT_CHAIN || 'ETH').toString().toUpperCase();
+    const from = Number.isInteger(body.from) ? body.from : 0;
+    const to = Number.isInteger(body.to) ? body.to : 10;
+
+    const owner = process.env.GAS_PUMP_MASTER;
+    if (!owner) return sendError(res, 400, 'GAS_PUMP_MASTER not set in .env');
+
+    // Call createGasPumpMaster (wrapper around POST /v3/gas-pump)
+    const resp = await createGasPumpMaster({ chain, owner, from, to });
+    return res.json({ ok: true, chain, from, to, response: resp });
+  } catch (err) {
+    // If Tatum returns a JSON error string, try to include it but avoid leaking secrets
+    return sendError(res, 500, err.message);
+  }
+});
+
+/**
+ * POST /sweep
+ * Trigger batch sweep for all wallets (synchronous).
+ * Body optional: { dryRun: boolean } — if dryRun true, runs estimates only (not implemented separately here)
+ */
+app.post('/sweep', async (req, res) => {
+  try {
+    // runBatchSweep performs estimate -> batch transfer, updates db.json
+    const result = await runBatchSweep();
+    return res.json({ ok: true, result });
+  } catch (err) {
+    return sendError(res, 500, err.message);
+  }
+});
+
+/**
+ * Simple health-check endpoint that checks DB file readable
+ */
+app.get('/health', (req, res) => {
+  try {
+    const db = readDb();
+    return res.json({ ok: true, dbWalletCount: (db.wallets || []).length });
+  } catch (err) {
+    return sendError(res, 500, err.message);
+  }
+});
+
+// Start server
+const cfg = loadConfig();
+const PORT = Number(process.env.APP_PORT || cfg.APP_PORT || 3000);
+
 app.listen(PORT, () => {
-  logger.info(`Custodial Wallet API listening on port ${PORT} (W Chain)`);
+  // Do not print secrets in logs
+  console.log(`🚀 Wadzpay custodial API listening on port ${PORT}`);
 });

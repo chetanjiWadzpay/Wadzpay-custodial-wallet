@@ -11,9 +11,6 @@ export function getERC20Contract(address, providerOrSigner) {
   return new Contract(address, ERC20, providerOrSigner);
 }
 
-/**
- * Return raw balance, decimals and a human-readable formatted string
- */
 export async function getERC20Balance(tokenAddress, walletAddress, provider) {
   const token = getERC20Contract(tokenAddress, provider);
   const [balRaw, decimals] = await Promise.all([
